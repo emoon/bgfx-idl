@@ -50,9 +50,11 @@ pub struct FuncArg {
     /// Name and line
     pub name_line: EntryLine,
     /// Type of the argument
-    pub type_name: String,
+    pub arg_type: Type,
     /// Table data (such as out and other modifiers)
     pub table: Option<TableData>,
+    /// temporary type_name, see arg_type for proper data
+    pub type_name: String,
 }
 
 /// Holds data for a func/struct.x
@@ -66,8 +68,10 @@ pub struct Func {
     pub class: EntryLine,
     /// Table data for "settings" of the function
     pub table: TableData,
+    /// Which line the return statement appears on
+    pub return_name_line: EntryLine,
     /// Return type of the function
-    pub return_type: EntryLine,
+    pub return_type: Type,
     /// function arguments
     pub args: Vec<FuncArg>,
 }
@@ -125,6 +129,51 @@ pub struct Idl {
     /// Structs
     pub flags: Vec<Flag>,
 }
+
+/// Holds info on a type
+#[derive(Debug, PartialEq)]
+pub enum VarType {
+    /// Default value, should never appear in code
+    Unknown(String),
+    /// TypeName that is an enum
+    Enum(String),
+    /// TypeName that is an enum
+    Struct(String),
+    /// Such as uint8_t, uint16_t, bool, etc
+    Primitive(String),
+    /// Array with type_name and count
+    Array(String, String),
+}
+
+/// Holds info on a type
+#[derive(Debug, Default)]
+pub struct Type {
+    pub var_type: VarType,
+    /// if type is const
+    pub is_const: bool,
+    /// if type is a reference
+    pub is_ref: bool,
+    /// if type is a output parameter
+    pub is_output: bool,
+    /// if type is a pointer
+    pub is_pointer: bool,
+}
+
+impl Default for VarType {
+    fn default() -> Self {
+        VarType::Unknown(String::new())
+    }
+}
+
+impl Type {
+    fn primitive(name: &str) -> Type {
+        Type {
+            var_type: VarType::Primitive(name.to_owned()),
+            ..Default::default()
+        }
+    }
+}
+
 
 // Holds flag attributes to calculate the flag values
 #[derive(Debug, Default)]
@@ -395,14 +444,14 @@ fn update_comments(func: &mut Func, gather_com: &mut GatherComments) {
     func.comments = get_top_start_comment_lines(gather_com, func.name.line);
 
     // all the lines that is being used by code so we know the ranges of
-    gather_com.codelines[func.return_type.line] = true;
+    gather_com.codelines[func.return_name_line.line] = true;
 
     for arg in &func.args {
         gather_com.codelines[arg.name_line.line] = true;
     }
 
     // get comments for the lines
-    get_comments(&mut func.return_type, gather_com);
+    get_comments(&mut func.return_name_line, gather_com);
 
     for arg in &mut func.args {
         get_comments(&mut arg.name_line, gather_com);
@@ -567,6 +616,91 @@ fn parse_enum_or_flag(
     flag
 }
 
+// Get detailed info on a type
+fn get_detailed_type(type_name: &str, is_output: bool) -> Type {
+    let mut ret_type = Type::default();
+    let mut type_name = type_name;
+
+    match type_name {
+        e @ "bool" => return Type::primitive(e),
+        e @ "char" => return Type::primitive(e),
+        e @ "float" => return Type::primitive(e),
+        e @ "int8_t" => return Type::primitive(e),
+        e @ "int16_t" => return Type::primitive(e),
+        e @ "int32_t" => return Type::primitive(e),
+        e @ "int64_t" => return Type::primitive(e),
+        e @ "uint8_t" => return Type::primitive(e),
+        e @ "uint16_t" => return Type::primitive(e),
+        e @ "uint32_t" => return Type::primitive(e),
+        e @ "uint64_t" => return Type::primitive(e),
+        e @ "void" => return Type::primitive(e),
+        _ => (),
+    }
+
+    // Notice: this code doesn't support porinters or refs in arrays
+
+    ret_type.is_output = is_output;
+    ret_type.is_const = type_name.starts_with("const");
+
+    if ret_type.is_const {
+        type_name = &type_name[6..];
+    }
+
+    // Check if it's an array
+    let a0 = type_name.find('[');
+    let a1 = type_name.find(']');
+
+    if let (Some(a), Some(b)) = (a0, a1) {
+        ret_type.var_type = VarType::Array(type_name[0..a].to_owned(), type_name[a+1..b].to_owned());
+        return ret_type;
+    }
+
+    ret_type.is_ref = type_name.ends_with('&');
+    ret_type.is_pointer = type_name.ends_with('*');
+
+    if ret_type.is_ref || ret_type.is_pointer {
+        let len = type_name.len();
+        // "remove" pointer or ref from the name
+        if type_name.as_bytes()[len - 2] == b' ' {
+            type_name = &type_name[..len - 2];
+        } else {
+            type_name = &type_name[..len - 1];
+        }
+    }
+
+    if let Some(enum_name) = type_name.rfind("::Enum") {
+        ret_type.var_type = VarType::Enum(type_name[..enum_name].to_owned());
+        return ret_type;
+    }
+
+    // TODO: Cleanup, check if primitive again
+
+    match type_name {
+        e @ "bool" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "char" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "float" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "int8_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "int16_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "int32_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "int64_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "uint8_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "uint16_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "uint32_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "uint64_t" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        e @ "void" => ret_type.var_type = VarType::Primitive(e.to_owned()),
+        _ => (),
+    }
+
+    let dummy = String::new();
+
+    if ret_type.var_type == VarType::Unknown(dummy) {
+        // we assume it's a struct if we are here
+        ret_type.var_type = VarType::Struct(type_name.to_owned());
+    }
+
+    ret_type
+}
+
 // Parse a function/struct. A function can be of the following formats:
 //
 // func.<StructName>.<funcname>
@@ -626,31 +760,46 @@ fn parse_func_or_struct(
     loop {
         match state {
             State::ReturnType => {
-                func.return_type = get_arg_string(it);
+                func.return_name_line = get_arg_string(it);
+                func.return_type = get_detailed_type(&func.return_name_line.text, false);
                 state = State::ArgName;
-            }
+            },
+
             State::ArgName => {
                 arg.name_line = get_dot_name(it);
+
+                // fix reserved rust names
+                if arg.name_line.text == "enum" || arg.name_line.text == "type" {
+                    arg.name_line.text.push_str("_r");
+                }
+
                 state = State::ArgType;
-            }
+            },
 
             State::ArgType => {
                 let arg_type = get_arg_string(it);
                 arg.type_name = arg_type.text;
                 state = State::MaybeTable;
-            }
+            },
 
             State::MaybeTable => {
                 arg.table = get_table(it);
+                let had_table = arg.table.is_some();
 
                 func.args.push(arg);
                 arg = FuncArg::default();
 
-                if arg.table.is_some() {
+                if had_table {
                     state = State::ArgName;
                 } else {
                     // if this wasn't a table its the first arg of the next argument.
                     arg.name_line = get_dot_name(it);
+
+                    // fix reserved rust names
+                    if arg.name_line.text == "enum" || arg.name_line.text == "type" {
+                        arg.name_line.text.push_str("_r");
+                    }
+
                     state = State::ArgType;
                 }
             }
@@ -664,6 +813,23 @@ fn parse_func_or_struct(
 
     if !arg.name_line.text.is_empty() {
         func.args.push(arg);
+    }
+
+    // update arg types
+
+    for arg in &mut func.args {
+        let mut is_output = false;
+
+        if let Some(table) = arg.table.as_ref() {
+            for t in table {
+                if t.name == "out" || t.name == "inout" {
+                    is_output = true;
+                    break;
+                }
+            }
+        }
+
+        arg.arg_type = get_detailed_type(&arg.type_name, is_output);
     }
 
     // Update comments
@@ -685,11 +851,6 @@ impl<'ast> Visitor<'ast> for GatherComments {
             self.comments[pos.line()] = Comment {
                 pos: pos.character(),
                 text: prefix.to_owned(),
-            };
-        } else {
-            self.comments[pos.line()] = Comment {
-                pos: pos.character(),
-                text: text.to_owned().to_string(),
             };
         }
     }
