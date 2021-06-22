@@ -9,7 +9,7 @@ pub struct TableEntry {
     /// String data if ("" if no string data)
     pub str_data: String,
     /// Integer value (None if no value)
-    num: Option<i64>,
+    pub num: Option<i64>,
 }
 
 /// Holds data for the table entries
@@ -28,7 +28,7 @@ pub struct Comment {
 #[derive(Default)]
 pub struct GatherComments {
     /// Comments
-    pub comments: Vec<Comment>,
+    pub comments: Vec<Option<Comment>>,
     /// Each line with code will be marked as true
     pub codelines: Vec<bool>,
 }
@@ -52,7 +52,7 @@ pub struct FuncArg {
     /// Type of the argument
     pub arg_type: Type,
     /// Table data (such as out and other modifiers)
-    pub table: Option<TableData>,
+    pub table: TableData,
     /// temporary type_name, see arg_type for proper data
     pub type_name: String,
 }
@@ -92,9 +92,9 @@ pub struct FlagArg {
 pub struct Flag {
     /// Type in bits (such as 64, 32, 16, 8)
     pub size: usize,
-    /// Comment(s) before the function
+    /// Comment(s) before the flag/enum
     pub comments: String,
-    /// name of the function
+    /// name of the flag/enum
     pub name: EntryLine,
     /// Table data for "settings" of the flag
     pub table: Option<TableData>,
@@ -106,9 +106,9 @@ pub struct Flag {
 #[derive(Debug, Default)]
 pub struct Typedef {
     /// Type and name
-    type_line: EntryLine,
+    pub type_line: EntryLine,
     /// Additional data
-    table: Option<TableData>,
+    pub table: Option<TableData>,
 }
 
 /// Holds all the parsed data
@@ -174,7 +174,6 @@ impl Type {
     }
 }
 
-
 // Holds flag attributes to calculate the flag values
 #[derive(Debug, Default)]
 struct FlagAttributes {
@@ -188,6 +187,13 @@ struct FlagAttributes {
 fn get_identifier<'a>(token_ref: &'a TokenReference) -> Option<&'a str> {
     match token_ref.token().token_type() {
         TokenType::Identifier { identifier } => Some(identifier),
+        TokenType::Symbol { symbol } => {
+            match symbol {
+                Symbol::True => Some("true"),
+                Symbol::False => Some("false"),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -241,6 +247,18 @@ fn get_value(entry: &mut TableEntry, value: &Value) {
             let t = get_token_string(value);
             entry.str_data = t.text;
         }
+
+        Value::Symbol(value) => {
+            if let Some(v) = get_identifier(value) {
+                entry.str_data = v.to_owned();
+            }
+        }
+
+        Value::Var(var) => {
+            let t = get_token_var_string(var);
+            entry.str_data = t.text.to_owned();
+        }
+
         _ => (),
     }
 }
@@ -387,11 +405,11 @@ fn get_top_start_comment_lines(gather_com: &mut GatherComments, line_start: usiz
     let mut comment = String::new();
 
     loop {
-        // break if no text on line or the comment doesn't start on entry 1
-        if line == 0
-            || gather_com.comments[line].pos != 1
-            || gather_com.comments[line].text.is_empty()
-        {
+        if let Some(line_data) = gather_com.comments[line].as_ref() {
+            if line == 0 || line_data.pos != 1 {
+                break;
+            }
+        } else {
             break;
         }
 
@@ -399,7 +417,7 @@ fn get_top_start_comment_lines(gather_com: &mut GatherComments, line_start: usiz
     }
 
     for l in line + 1..=line_start {
-        comment.push_str(&gather_com.comments[l].text);
+        comment.push_str(&gather_com.comments[l].as_ref().unwrap().text);
         comment.push('\n');
     }
 
@@ -415,9 +433,7 @@ fn get_comments(entry: &mut EntryLine, gather_com: &mut GatherComments) {
     let max_len = gather_com.comments.len();
 
     loop {
-        let entry = &gather_com.comments[line];
-
-        if !entry.text.is_empty() {
+        if let Some(entry) = gather_com.comments[line].as_ref() {
             comment.push_str(&entry.text);
             comment.push('\n');
         }
@@ -428,9 +444,13 @@ fn get_comments(entry: &mut EntryLine, gather_com: &mut GatherComments) {
             break;
         }
 
-        let entry = &gather_com.comments[line];
+        if let Some(entry) = gather_com.comments[line].as_ref() {
+            if entry.pos == 1 {
+                break;
+            }
+        }
 
-        if gather_com.codelines[line] || entry.pos == 1 {
+        if gather_com.codelines[line] {
             break;
         }
     }
@@ -519,7 +539,7 @@ fn get_version(in_func: &FunctionCall) -> Option<u64> {
     None
 }
 
-// Parse a enum/flag. A function can be of the following formats:
+// Parse a enum/flag
 fn parse_enum_or_flag(
     in_func: &FunctionCall,
     gather_com: &mut GatherComments,
@@ -550,6 +570,7 @@ fn parse_enum_or_flag(
                     if let Some(table) = table.as_ref() {
                         attribs = get_bits_from_table(&table);
                         value = attribs.base << attribs.shift;
+                        flag.size = attribs.bits as usize;
                     } else {
                         panic!(
                             "flag.{} doesn't have array of bit settings.",
@@ -651,7 +672,8 @@ fn get_detailed_type(type_name: &str, is_output: bool) -> Type {
     let a1 = type_name.find(']');
 
     if let (Some(a), Some(b)) = (a0, a1) {
-        ret_type.var_type = VarType::Array(type_name[0..a].to_owned(), type_name[a+1..b].to_owned());
+        ret_type.var_type =
+            VarType::Array(type_name[0..a].to_owned(), type_name[a + 1..b].to_owned());
         return ret_type;
     }
 
@@ -763,7 +785,7 @@ fn parse_func_or_struct(
                 func.return_name_line = get_arg_string(it);
                 func.return_type = get_detailed_type(&func.return_name_line.text, false);
                 state = State::ArgName;
-            },
+            }
 
             State::ArgName => {
                 arg.name_line = get_dot_name(it);
@@ -774,17 +796,24 @@ fn parse_func_or_struct(
                 }
 
                 state = State::ArgType;
-            },
+            }
 
             State::ArgType => {
                 let arg_type = get_arg_string(it);
                 arg.type_name = arg_type.text;
                 state = State::MaybeTable;
-            },
+            }
 
             State::MaybeTable => {
-                arg.table = get_table(it);
-                let had_table = arg.table.is_some();
+                let had_table = if let Some(table) = get_table(it) {
+                    arg.table = table;
+                    true
+                } else {
+                    false
+                };
+
+                //arg.table = get_table(it);
+                //let had_table = arg.table.is_some();
 
                 func.args.push(arg);
                 arg = FuncArg::default();
@@ -818,16 +847,11 @@ fn parse_func_or_struct(
     // update arg types
 
     for arg in &mut func.args {
-        let mut is_output = false;
-
-        if let Some(table) = arg.table.as_ref() {
-            for t in table {
-                if t.name == "out" || t.name == "inout" {
-                    is_output = true;
-                    break;
-                }
-            }
-        }
+        let is_output = arg
+            .table
+            .iter()
+            .find(|t| t.name == "out" || t.name == "inout")
+            .is_some();
 
         arg.arg_type = get_detailed_type(&arg.type_name, is_output);
     }
@@ -847,11 +871,11 @@ impl<'ast> Visitor<'ast> for GatherComments {
 
         let pos = token.start_position();
 
-        if let Some(prefix) = text.strip_prefix("- ") {
-            self.comments[pos.line()] = Comment {
+        if let Some(prefix) = text.strip_prefix("-") {
+            self.comments[pos.line()] = Some(Comment {
                 pos: pos.character(),
                 text: prefix.to_owned(),
-            };
+            });
         }
     }
 }
@@ -863,7 +887,7 @@ pub fn parse_bgfx_idl(filename: &str) -> Result<Idl, Box<dyn std::error::Error +
     let lua_data = full_moon::parse(&bgfx_defs).unwrap();
 
     let mut coms = GatherComments {
-        comments: vec![Comment::default(); line_count],
+        comments: vec![None; line_count],
         codelines: vec![false; line_count],
     };
 
