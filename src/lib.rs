@@ -1,4 +1,5 @@
 use full_moon::{ast::punctuated::Pair, ast::*, tokenizer::*, visitors::Visitor};
+use convert_case::{Case, Casing};
 use std::fs;
 
 /// Holds an entry in a table
@@ -81,10 +82,10 @@ pub struct Func {
 pub struct FlagArg {
     /// Name and line
     pub name_line: EntryLine,
-    /// actual value of the flag. Overriden if there is a table
-    pub value: Option<u64>,
-    /// Table data (such as out and other modifiers)
-    pub table: Option<TableData>,
+    /// actual value of the flag. Overriden if there is a str_value
+    pub value: u64,
+    /// If we have a string value (such as BGFX_SAMPLE_FOO)
+    pub str_value: String,
 }
 
 /// Holds data for a flag/enum
@@ -182,6 +183,33 @@ struct FlagAttributes {
     range: u64,
     base: u64,
     is_const: bool,
+}
+
+fn get_snake_upper(name: &str) -> String {
+	let mut output = String::with_capacity(256);
+	let mut prev = '_';
+
+	for c in name.chars() {
+		if c.is_ascii_uppercase() && prev != '_' {
+			let mut t = c;
+			t.make_ascii_uppercase();
+
+			if !prev.is_numeric() {
+				output.push('_');
+			}
+
+			output.push(t);
+		} else {
+			let mut t = c;
+			t.make_ascii_uppercase();
+
+			output.push(t);
+		}
+
+		prev = c;
+	}
+
+    output
 }
 
 fn get_identifier<'a>(token_ref: &'a TokenReference) -> Option<&'a str> {
@@ -483,12 +511,17 @@ fn update_flag_comments(flag: &mut Flag, gather_com: &mut GatherComments) {
     // we start with the getting the comments for the function
     flag.comments = get_top_start_comment_lines(gather_com, flag.name.line);
 
-    for ent in &flag.entries {
-        gather_com.codelines[ent.name_line.line] = true;
-    }
-
     for ent in &mut flag.entries {
         get_comments(&mut ent.name_line, gather_com);
+    }
+}
+
+// Add comments to the function from the comments-prepass
+fn update_flag_code_lines(flag: &mut Flag, gather_com: &mut GatherComments) {
+    gather_com.codelines[flag.name.line] = true;
+
+    for ent in &flag.entries {
+        gather_com.codelines[ent.name_line.line] = true;
     }
 }
 
@@ -553,14 +586,14 @@ fn parse_enum_or_flag(
 
     let mut flag = Flag::default();
     let mut state = State::Name;
-    let mut attribs = FlagAttributes::default();
-    let mut value = 0u64;
-    let mut arg = FlagArg::default();
+    let mut enum_value = 0u64;
+    let mut upper_name = String::new();
 
     for s in in_func.suffixes() {
         match state {
             State::Name => {
                 flag.name = get_dot_name(s);
+                upper_name = get_snake_upper(&flag.name.text);
                 state = State::Table;
             }
 
@@ -568,8 +601,7 @@ fn parse_enum_or_flag(
                 let table = get_table(s);
                 if is_flag {
                     if let Some(table) = table.as_ref() {
-                        attribs = get_bits_from_table(&table);
-                        value = attribs.base << attribs.shift;
+                        let attribs = get_bits_from_table(&table);
                         flag.size = attribs.bits as usize;
                     } else {
                         panic!(
@@ -584,6 +616,27 @@ fn parse_enum_or_flag(
             }
 
             State::Arg => {
+                // skip tables
+                if let Some(_) = get_table(s) {
+                    continue;
+                }
+
+                let mut arg = FlagArg::default();
+                arg.name_line = get_dot_name(s);
+
+                // enum
+                if !is_flag {
+                    arg.value = enum_value;
+                    enum_value += 1;
+                } else {
+                    arg.str_value = format!("BGFX_{}_{}", upper_name, get_snake_upper(&arg.name_line.text));
+                }
+
+                if !arg.name_line.text.is_empty() {
+                    flag.entries.push(arg);
+                }
+
+                /*
                 let arg_table = get_table(s);
 
                 // check if data is a table and do it's setup
@@ -615,24 +668,38 @@ fn parse_enum_or_flag(
                     if attribs.shift != 0 || !is_flag {
                         value += 1u64 << attribs.shift;
                     } else {
-                        value <<= 1;
+                        dbg!();
+                        //if value > 0 {
+                        //    value = 1 << (value - 1);
+                       // }
 
-                        if value == 0 {
-                            value = 1;
+                        let s = index + attribs.base as i64 - 2;
+
+                        if s >= 0 {
+                            value = 1 << s;
+                        } else {
+                            value = 0;
                         }
+
+                        //if value == 0 {
+                        //   value = 1;
+                        //}
                     }
                 }
+
+                index += 1;
+                */
             }
         }
     }
 
     // make sure to add the last arg if we have any
-    if !arg.name_line.text.is_empty() {
-        flag.entries.push(arg);
-    }
+    //if !arg.name_line.text.is_empty() {
+    //    flag.entries.push(arg);
+    //}
 
     // Update comments
-    update_flag_comments(&mut flag, gather_com);
+    update_flag_code_lines(&mut flag, gather_com);
 
     flag
 }
@@ -736,7 +803,7 @@ fn parse_func_or_struct(
     in_func: &FunctionCall,
     gather_com: &mut GatherComments,
     skip_class_ret: bool,
-) -> Func {
+) -> Option<Func> {
     enum State {
         ReturnType,
         ArgName,
@@ -747,9 +814,13 @@ fn parse_func_or_struct(
     let mut func = Func::default();
     let mut iter = in_func.suffixes();
 
-    let name_or_class = get_dot_name(iter.next().unwrap());
+    let mut name_or_class = get_dot_name(iter.next().unwrap());
     let mut it = iter.next().unwrap();
     let name = get_dot_name(it);
+
+    if name_or_class.text == "VertexLayout" {
+        name_or_class.text = "VertexLayoutBuilder".to_owned();
+    }
 
     // If we found an extension name we need to advance the iterator, otherwise assume the current
     // iterator is the return type or attributes for the function
@@ -783,6 +854,9 @@ fn parse_func_or_struct(
         match state {
             State::ReturnType => {
                 func.return_name_line = get_arg_string(it);
+                if func.return_name_line.text == "VertexLayout&" {
+                    func.return_name_line.text = "VertexLayoutBuilder&".to_owned();
+                }
                 func.return_type = get_detailed_type(&func.return_name_line.text, false);
                 state = State::ArgName;
             }
@@ -799,7 +873,12 @@ fn parse_func_or_struct(
             }
 
             State::ArgType => {
-                let arg_type = get_arg_string(it);
+                let mut arg_type = get_arg_string(it);
+
+                if arg_type.text.contains("VertexLayout") && !arg_type.text.contains("VertexLayoutHandle")   {
+                    arg_type.text = arg_type.text.replace("VertexLayout", "VertexLayoutBuilder");
+                }
+
                 arg.type_name = arg_type.text;
                 state = State::MaybeTable;
             }
@@ -859,7 +938,14 @@ fn parse_func_or_struct(
     // Update comments
     update_comments(&mut func, gather_com);
 
-    func
+    // if function is cpponly we skip it
+    for t in &func.table {
+        if t.name == "cpponly" {
+            return None;
+        }
+    }
+
+    Some(func)
 }
 
 impl<'ast> Visitor<'ast> for GatherComments {
@@ -903,11 +989,23 @@ pub fn parse_bgfx_idl(filename: &str) -> Result<Idl, Box<dyn std::error::Error +
                 "handle" => i.handles.push(parse_typedef_handle(func, &mut coms)),
                 "flag" => i.flags.push(parse_enum_or_flag(func, &mut coms, true)),
                 "enum" => i.enums.push(parse_enum_or_flag(func, &mut coms, false)),
-                "struct" => i.structs.push(parse_func_or_struct(func, &mut coms, true)),
-                "func" => i.funcs.push(parse_func_or_struct(func, &mut coms, false)),
+                "struct" => i.structs.push(parse_func_or_struct(func, &mut coms, true).unwrap()),
+                "func" => {
+                    if let Some(func) = parse_func_or_struct(func, &mut coms, false) {
+                        i.funcs.push(func);
+                    }
+                }
                 _ => (),
             }
         }
+    }
+
+    for f in &mut i.flags {
+        update_flag_comments(f, &mut coms);
+    }
+
+    for e in &mut i.enums {
+        update_flag_comments(e, &mut coms);
     }
 
     Ok(i)
