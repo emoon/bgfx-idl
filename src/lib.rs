@@ -945,6 +945,13 @@ fn parse_func_or_struct(
         }
     }
 
+    // if return type is void we set it to none
+    if let VarType::Primitive(ref type_name) = func.return_type.var_type {
+        if type_name == "void" && !func.return_type.is_pointer && !func.return_type.is_ref {
+            func.return_type = Type::default();
+        }
+    }
+
     Some(func)
 }
 
