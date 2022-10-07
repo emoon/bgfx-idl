@@ -138,7 +138,7 @@ pub enum VarType {
     Unknown(String),
     /// TypeName that is an enum
     Enum(String),
-    /// TypeName that is an enum
+    /// TypeName that is an struct 
     Struct(String),
     /// Such as uint8_t, uint16_t, bool, etc
     Primitive(String),
@@ -854,9 +854,11 @@ fn parse_func_or_struct(
         match state {
             State::ReturnType => {
                 func.return_name_line = get_arg_string(it);
+                /*
                 if func.return_name_line.text == "VertexLayout&" {
                     func.return_name_line.text = "VertexLayoutBuilder&".to_owned();
                 }
+                */
                 func.return_type = get_detailed_type(&func.return_name_line.text, false);
                 state = State::ArgName;
             }
@@ -876,7 +878,7 @@ fn parse_func_or_struct(
                 let mut arg_type = get_arg_string(it);
 
                 if arg_type.text.contains("VertexLayout") && !arg_type.text.contains("VertexLayoutHandle")   {
-                    arg_type.text = arg_type.text.replace("VertexLayout", "VertexLayoutBuilder");
+                    arg_type.text = arg_type.text.replace("VertexLayout", "BuiltVertexLayout");
                 }
 
                 arg.type_name = arg_type.text;
@@ -973,9 +975,20 @@ impl<'ast> Visitor<'ast> for GatherComments {
     }
 }
 
+
+
 /// Parse the bgfx idl and return the parsed data
 pub fn parse_bgfx_idl(filename: &str) -> Result<Idl, Box<dyn std::error::Error + 'static>> {
     let bgfx_defs: String = fs::read_to_string(filename)?;
+    // hack to patch up some stuff we don't support. This is really slow but should be fine.
+    let bgfx_defs = bgfx_defs.replace("default = -1", "default = 0xffffffff");
+    let bgfx_defs = bgfx_defs.replace("1.0f", "1.0");
+    let bgfx_defs = bgfx_defs.replace("GPU[", "CapsGPU[");
+    let bgfx_defs = bgfx_defs.replace("BGFX_STATE_BLEND_FUNC(_src, _dst)", "[state_blend_func]");
+    let bgfx_defs = bgfx_defs.replace("BGFX_STATE_BLEND_FUNC_SEPARATE(_srcRGB, _dstRGB, _srcA, _dstA)", "[state_blend_func_separate]");
+    let bgfx_defs = bgfx_defs.replace("BGFX_STATE_BLEND_EQUATION(_equation)", "[state_blend_equation]");
+    let bgfx_defs = bgfx_defs.replace("BGFX_STATE_BLEND_EQUATION_SEPARATE(_equationRGB, _equationA)", "[state_blend_equation_separate]");
+
     let line_count = bgfx_defs.as_bytes().iter().filter(|&&c| c == b'\n').count();
     let lua_data = full_moon::parse(&bgfx_defs).unwrap();
 
@@ -1006,6 +1019,14 @@ pub fn parse_bgfx_idl(filename: &str) -> Result<Idl, Box<dyn std::error::Error +
             }
         }
     }
+
+    // if structs has a namespace we change the name of by prefixing the namespace
+    for s in &mut i.structs {
+        if let Some(namespace) = s.table.iter().find(|t| t.name == "namespace") {
+            s.name.text.insert_str(0, &namespace.str_data);
+        }
+    }
+
 
     for f in &mut i.flags {
         update_flag_comments(f, &mut coms);
